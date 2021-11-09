@@ -1,6 +1,10 @@
 Untitled
 ================
 
+``` r
+knitr::opts_chunk$set(echo = TRUE)
+```
+
 ## GitHub Documents
 
 This is an R Markdown format used for publishing markdown documents to
@@ -27,7 +31,11 @@ summary(cars)
 
 You can also embed plots, for example:
 
-![](tryh_files/figure-gfm/pressure-1.png)<!-- -->
+``` r
+plot(pressure)
+```
+
+![](tryh_files/figure-gfm/unnamed-chunk-3-1.png)<!-- -->
 
 Note that the `echo = FALSE` parameter was added to the code chunk to
 prevent printing of the R code that generated the plot.
