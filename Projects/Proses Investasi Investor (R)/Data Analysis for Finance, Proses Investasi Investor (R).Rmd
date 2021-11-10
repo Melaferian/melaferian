@@ -1,0 +1,281 @@
+---
+title: "Proses Investasi Investor"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+df_event <- read.csv('https://storage.googleapis.com/dqlab-dataset/event.csv', stringsAsFactors = F)
+dplyr::glimpse(df_event)
+```
+It is seen that there are 33,571 rows of data (Observations) and there are 4 columns (Variables), namely: 
+
+1. loan_id : unique ID of loan uploaded to marketplace
+2. investor_id : unique ID of a registered investor
+3. nama_event : activities carried out by investors and changes in loan status
+4. created_at : time (until seconds) the event occurs
+
+## Change created_at column to a Timestamp type
+
+```{r}
+library(lubridate)
+df_event$created_at <- ymd_hms(df_event$created_at)
+dplyr::glimpse(df_event)
+```
+## Summary Event
+
+Existing data, provided in the form of log per event, then we need to see what is the content of this event, and how it flows.
+From the data.frame, df_event that have been created in the previous section, grouped with group by nama_event and then calculated with summarise,
+
+- jumlah_event : to find out the number of events, or how many lines
+
+- loan : To find out the amount of unique  loan_id 
+
+- investor : To find out the amount of unique  investor_id
+```{r}
+library(dplyr)
+df_event %>%
+  group_by(nama_event) %>%
+  summarise(jumlah_event=n(),
+			loan=n_distinct(loan_id),
+			investor=n_distinct(investor_id))
+```
+Based on these results, there are 5 events. With the following explanation:
+
+- investor_register : Event when Investor registers.
+The number of events is the same as the unique investor, means that each investor does this event only 1 time. The loan amount is only 1, this is NA, because this register does not require a loan.
+
+- loan_to_marketplace : Event when loan is uploaded to marketplace,
+The number of events is equal to the number of loans, means that each loan is uploaded only 1 time. The number of investors is only 1, this is the content of NA, because when uploaded to the marketplace is not related to investors.
+
+- investor_view_loan : Event when investors viewing loan details on the marketplace.
+The number of events is not the same as unique loans or unique investors, means that 1 investor can see the same loan several times, and 1 loan can be seen by several different investors.
+
+- investor_order_loan : Events when investors book loans, waiting for payment.
+The number of events is not the same as unique loans or unique investors, means that 1 loan can be ordered by several different investors (if previous bookings are not paid)
+
+- investor_pay_loan : Event when the investor pays a loan from the previous order.
+The number of events is the same as a unique loan, means that 1 loan can only be paid by 1 investor. The number of investors is less than the loan amount means that 1 investor can buy many loans.
+
+## Event loan uploaded to marketplace
+
+```{r}
+df_marketplace<-df_event %>% 
+  filter(nama_event=='loan_to_marketplace') %>% 
+  select(loan_id,marketplace=created_at)
+
+head(df_marketplace)
+```
+## Event investors view loan details
+
+```{r}
+df_view_loan<-df_event %>% 
+  filter(nama_event=='investor_view_loan') %>% 
+  group_by(loan_id,investor_id) %>% 
+  summarise(view_count=n(),
+           first_view=min(created_at),
+           last_view=max(created_at)
+           )
+head(df_view_loan)
+```
+- view_count : To know how many times one investor views the loan,
+- first_view : To know when investors first view the details of the loan,
+- last_view : To know when investors last view the details of the loan.
+
+## Event investors book and pay loans
+```{r}
+library(tidyr)
+df_order_pay<-df_event %>% 
+  filter(nama_event %in% c('investor_order_loan','investor_pay_loan')) %>%
+  spread(nama_event, created_at) %>%
+  select(loan_id,investor_id,order=investor_order_loan,pay=investor_pay_loan)
+head (df_order_pay)
+```
+## Investment Loan Data Combined 
+```{r}
+df_loan_invest<- df_marketplace %>% 
+  left_join(df_view_loan,by='loan_id') %>% 
+  left_join(df_order_pay,by=c('loan_id','investor_id'))
+head (df_loan_invest)
+```
+## Observing the relationship of the number of views with order
+
+```{r}
+df_loan_invest %>%
+  mutate(order_status= ifelse(is.na(order), 'not_order','order')) %>% 
+  count(view_count,order_status) %>% 
+  spread(order_status,n, fill = 0) %>% 
+  mutate(percent_order = scales::percent(order/(order + not_order)))
+```
+And it turns out that there is no specific pattern that states the relationship of many views with the decision of investors to order the loan. It's almost evenly distributed that more than 85% of investors who already see a loan will order it.
+
+For The Number of Views 4 or more, because there are very few events it can be ignored.
+
+## How long does it take an investor to order since the investor first views the details of the loan?
+
+```{r}
+df_loan_invest %>%
+  filter(!is.na(order)) %>% 
+  mutate(length_order_view = as.numeric(difftime(order, first_view, units = "mins"))) %>% 
+  group_by(view_count) %>% 
+  summarise_at(vars(length_order_view), funs(total = n(), min, median, mean, max)) %>% 
+  mutate_if(is.numeric, funs(round(.,2)))
+```
+It turns out that the majority of investors immediately order a loan when opening the details, which is under 5 minutes for investors who see the details of the loan 1 time only and then order. For those who open 2-4 times the time is about 30 minutes. At view_count 2 and 3, as there is an outlier of old messages far from the median, this makes the average value a high of 1 hour.
+
+## Average booking time since loan is uploaded every week
+
+```{r}
+library(ggplot2)
+df_length_order_per_week <- df_loan_invest %>% 
+  filter(!is.na(order)) %>%
+  mutate(date = floor_date(marketplace, 'week'),length_order = as.numeric(difftime(order, marketplace, units = "hour"))) %>% 
+  group_by(date) %>%
+  summarise(length_order = median(length_order))
+ggplot(df_length_order_per_week) + 
+       geom_line(aes(x = date, y = length_order)) +
+       theme_bw() +
+       labs(title = "Average order length in 2020 longer than 2019",
+            x = "Date",
+            y = "time in the marketplace until order (hours)")
+```
+
+## Does the investor pay for the order they made?
+ 
+```{r}
+df_pay_per_week <- df_loan_invest %>% 
+  filter(!is.na(order)) %>%
+  mutate(date = floor_date(marketplace, 'week')) %>% 
+  group_by(date) %>%
+  summarise(percent_paid = mean(!is.na(pay)))
+
+ggplot(df_pay_per_week) +
+  geom_line(aes(x = date, y = percent_paid)) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_bw() + 
+  labs(title = "About 95% of orders are paid. At the end of May there is an outlier because of eid", 
+       x = "Date",
+       y = "Paid Orders")
+```
+ 
+## The time it takes for investors to pay for an order
+
+```{r}
+df_length_pay_per_week <- df_loan_invest %>% 
+  filter(!is.na(pay)) %>%
+  mutate(date = floor_date(order, 'week'),
+         length_pay = as.numeric(difftime(pay, order, units = "hour"))) %>% 
+  group_by(date) %>%
+  summarise(length_pay = median(length_pay)) 
+ggplot(df_length_pay_per_week) +
+  geom_line(aes(x = date, y = length_pay)) +
+  theme_bw() + 
+  labs(title= "The trend's payment time is likely to worsen, 2 times longer than before", 
+       x = "Date", 
+       y = "paid order time (hours)")
+```
+ 
+## Trend Investor Register
+
+```{r}
+df_investor_register <- df_event %>% 
+  filter(nama_event=='investor_register') %>%
+  mutate(date = floor_date(created_at, 'week')) %>% 
+  group_by(date) %>%
+  summarise(investor = n_distinct(investor_id)) 
+ggplot(df_investor_register) +
+    geom_line(aes(x = date, y = investor)) +
+    theme_bw() + 
+    labs(title="Investor registers briefly rose in early 2020 but have fallen again",
+    x="Date", 
+    y="Investor Register")
+```
+## Trend of the First Investment of the Investor
+ 
+```{r}
+df_investor_first_invest <- df_event %>% 
+  filter(nama_event=='investor_pay_loan') %>%
+  group_by(investor_id) %>% 
+  summarise(first_invest = min(created_at)) %>% 
+  mutate(date = floor_date(first_invest, 'week')) %>% 
+  group_by(date) %>% 
+  summarise(investor = n_distinct(investor_id)) 
+ggplot(df_investor_first_invest) +
+  geom_line(aes(x = date, y = investor)) +
+  theme_bw() + 
+  labs(title = "There is a trend of increasing the number of investors invested, but it drops dramatically from March 2020.", 
+       x = "Date", 
+       y = "First Invest")
+```
+## Cohort First Invest by Month Register
+
+```{r}
+df_register_per_investor <- df_event %>%
+  filter(nama_event == 'investor_register') %>% 
+  rename(date_register = created_at) %>%  
+  mutate(month_register = floor_date(date_register, 'month'))  %>%  
+  select(investor_id, date_register, month_register) 
+
+df_first_invest_per_investor <- df_event %>%
+  filter(nama_event == 'investor_pay_loan') %>% 
+  group_by(investor_id) %>% 
+  summarise(first_invest = min(created_at))
+```
+
+```{r}
+df_register_per_investor %>% 
+  left_join(df_first_invest_per_investor, by = 'investor_id') %>% 
+  mutate(length_invest = as.numeric(difftime(first_invest, date_register, units = "day")) %/% 30) %>%  
+  group_by(month_register, length_invest) %>% 
+  summarise(investor_per_month = n_distinct(investor_id)) %>% 
+  group_by(month_register) %>% 
+  mutate(register = sum(investor_per_month)) %>% 
+  filter(!is.na(length_invest)) %>% 
+  mutate(invest = sum(investor_per_month)) %>% 
+  mutate(persen_invest = scales::percent(invest/register)) %>% 
+  mutate(breakdown_persen_invest = scales::percent(investor_per_month)) %>%  
+  select(-investor_per_month) %>%  
+  spread(length_invest, breakdown_persen_invest) 
+```
+It is noticed that for the most total registers is in March 2020, as in the previous chart, there has not been 2% who have invested, very far compared to the previous month, which could reach 7% more. Which is the highest conversion rate.
+
+In general, only 5% of investors from all investors who sign up will convert. And the majority of them do so in the first month (less than 30 days) from registration.
+
+## Cohort Retention Invest
+```{r}
+df_investment_per_investor <- df_event %>%
+  filter(nama_event == 'investor_pay_loan') %>%
+  rename(date_invest = created_at) %>% 
+  select(investor_id, date_invest)
+```
+
+```{r}
+df_first_invest_per_investor %>% 
+  mutate(first_month_invest = floor_date(first_invest, 'month'))  %>% 
+  inner_join(df_investment_per_investor, by = 'investor_id') %>%
+  mutate(range_invest = as.numeric(difftime(date_invest, first_invest, units = "day")) %/% 30) %>% 
+  group_by(first_month_invest, range_invest) %>%
+  summarise(investor_per_month = n_distinct(investor_id)) %>%
+  group_by(first_month_invest) %>%
+  mutate(investor = max(investor_per_month)) %>%
+  mutate(breakdown_percent_invest = scales::percent(investor_per_month/investor)) %>%
+  select(-investor_per_month) %>%
+  spread(range_invest, breakdown_percent_invest) %>% 
+  select(-`0`)
+```
+It is noticed that in February there are investors who make the most first investments compared to other months. But the retention is worse than others. In the month after the first investment, only 16% of investors invest again. This is only half the trend in the previous month, where about 30% of investors will invest again 1 month after the first investment.
+
+The most stable cohort was in August 2019. Around the figure of 20% every month, although in the seventh month the percentage should also fall as well.
+
+## Conclusion
+Based on all the analysis that has been done, it can be concluded that:
+
+1. In general, the finance company is actually in positive growth, fluctuating up and down occurs due to differences in behavior on certain dates, which are influenced by other things, such as payday.
+2. In March, April to May there was a lot of decline in the metrics analyzed, this may be due to the Covid19 pandemic, it needs to be further analyzed whether it is because of it.
+3. In general, 5% of the total investors who register each month, will make an investment, and the majority is made in the first 30 days after the register, and a small percentage in the second month. In the next month the chances are very small to be able to convert. So it needs to be ascertained how the investor's journey is smooth in the first month, so that investors want to convert investment in the finance company.
+4. Furthermore, it needs to be seen also after that first invest, whether investors invest again in the next month. In general, 30% of investors will invest again in the following month.
+5. In February, the conversion rate was good, the highest was 7.57%, in numbers also the most, but when looking at retention, only 16% invested in the following month, only half of the category of other months.
